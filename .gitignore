@@ -1,0 +1,21 @@
+# nirs4all run artifacts (local DuckDB store + outputs)
+workspace/
+results_*/
+*.duckdb
+*.duckdb.wal
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Large model checkpoints (do not commit; document how to obtain instead)
+*.ckpt
+*.pt
+*.h5
