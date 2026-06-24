@@ -1,18 +1,10 @@
 # TabPFN NIR benchmark — nirs4all reproduction
 
 Reproduction of the calibration experiments from the article *"Tabular foundation
-models for robust calibration of near-infrared chemical sensing data"*, rewritten
+models for robust calibration of near-infrared chemical sensing data"*, written
 with the native [**nirs4all**](https://github.com/GBeurier/nirs4all) pipeline
 formalism. Each model is expressed as an nirs4all pipeline (a list of steps) and
 executed with `nirs4all.run`.
-
-> These scripts are the **idiomatic-nirs4all** reproduction. They cover the same
-> preprocessing families, models, SPXY-grouped cross-validation and metrics as the
-> study. The preprocessing search is expressed as the full Cartesian product of the
-> preprocessing axes (see below) rather than the two-phase search used in the
-> paper, and the CNN-1D uses nirs4all's native (TensorFlow) NICON instead of the
-> paper's PyTorch re-implementation. Reported numbers are therefore expected to be
-> very close to, but not bit-identical with, the paper.
 
 ## Layout
 

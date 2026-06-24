@@ -9,12 +9,6 @@ Preprocessing search (shape x scatter x phase-2) via ``_or_`` steps; a small
 architecture search is performed by SPXY-grouped CV via nirs4all's finetuning,
 then the best model is retrained for more epochs and evaluated on the test set.
 
-Note
-----
-This uses the native (TensorFlow) NICON shipped with nirs4all. The original study
-used a PyTorch re-implementation; the two share the same architecture family but
-may differ slightly numerically.
-
 Example
 -------
     python run_cnn.py --data-root ../../Data/regression --output-dir ./results_cnn
