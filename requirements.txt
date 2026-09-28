@@ -6,9 +6,9 @@ nirs4all>=0.8.2
 scikit-learn>=1.6
 numpy>=2.0
 pandas>=2.0
-optuna>=4.0
-catboost>=1.2            # CatBoost baseline
-tensorflow>=2.16         # native NICON (1D-CNN) baseline
+optuna>=4.0              # hyperparameter search for Ridge and XGBoost
+catboost>=1.2            # CatBoost-pp baseline
+xgboost>=3.0             # XGBoost-pp-hpo baseline
 # TabPFN (training-free foundation model) and its PyTorch backend:
 tabpfn>=2.0
 torch>=2.4

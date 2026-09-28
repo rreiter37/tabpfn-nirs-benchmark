@@ -1,33 +1,30 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-run_tabpfn.py — TabPFN calibration, nirs4all-idiomatic.
+run_tabpfn.py — TabPFN arms of the benchmark.
 
-TabPFN is training-free: the pretrained model is passed as a scikit-learn-compatible
-estimator inside an nirs4all pipeline.
+Two variants, both reported in the manuscript:
 
-  --variant raw : direct in-context inference on raw spectra (no preprocessing,
-                  no search) -- fit on the calibration set, predict the test set.
-  --variant opt : the same pretrained model wrapped in the preprocessing search
-                  (shape x scatter x phase-2), selected by SPXY-grouped CV.
+    --variant raw   TabPFN-Raw: no preprocessing and no search. The calibration
+                    spectra go straight into the model, which is why this arm
+                    isolates what preprocessing actually buys.
+    --variant pp    TabPFN-pp: two-phase preprocessing search (21 + 9 = 30
+                    configurations) selected by grouped 3-fold SPXY CV.
 
-Example
--------
-    python run_tabpfn.py --variant opt --data-root ../../Data/regression \\
-        --model-path ../../tabpfn-v2.5-regressor-v2.5_real.ckpt --device cuda
+TabPFN is training-free, so the only hyperparameter that moves is the size of
+the inference ensemble, and it differs between the two stages:
+
+    n_estimators = 1   while scoring preprocessing configurations
+    n_estimators = 16  for the final refit and the reported predictions
+
+Scoring the search with 16 estimators, as the first version of this repository
+did, multiplies the search cost by 16 for a ranking of preprocessing pipelines
+that barely changes.
 """
 
 from __future__ import annotations
 
-import os
-
-# nirs4all (imported via benchmark_common) pulls in TensorFlow; torch's lazy
-# ``import torch._dynamo`` (triggered by TabPFN) then segfaults if TF was imported
-# first. Pre-load torch._dynamo here, before TabPFN and before benchmark_common.
-# (This is only needed for the torch-based TabPFN scripts.)
-os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
-try:  # pragma: no cover - environment hardening
+# Keep torch.compile out of the way on machines without a working compiler.
+try:  # pragma: no cover
     import torch  # noqa: F401
     import torch._dynamo  # noqa: F401
 except Exception:
@@ -35,54 +32,103 @@ except Exception:
 
 import argparse
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from tabpfn import TabPFNRegressor
+import numpy as np
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import LabelEncoder
 
 from benchmark_common import (
-    SEED, cv_splitter, nonlinear_preprocessing_search, run_over_datasets,
+    SEED, SearchConfig, load_dataset, run_over_datasets, score_of,
+    two_phase_search, write_outputs,
 )
 
+N_ESTIMATORS_SEARCH = 1
+N_ESTIMATORS_FINAL = 16
 
-def make_tabpfn(model_path: Optional[str], device: str, n_estimators: int) -> TabPFNRegressor:
-    kwargs = dict(
-        n_estimators=int(n_estimators),
-        device=device,
-        random_state=SEED,
-        ignore_pretraining_limits=True,
-    )
+
+def make_model(task: str, n_estimators: int, device: str, model_path: Optional[str]):
+    """Build a TabPFN estimator for the requested task."""
+    kwargs: Dict[str, Any] = dict(n_estimators=int(n_estimators), device=device,
+                                  random_state=SEED, ignore_pretraining_limits=True)
     if model_path:
         kwargs["model_path"] = str(model_path)
-    return TabPFNRegressor(**kwargs)
+    if task == "regression":
+        from tabpfn import TabPFNRegressor
+        return TabPFNRegressor(**kwargs)
+    from tabpfn import TabPFNClassifier
+    return TabPFNClassifier(**kwargs)
 
 
-def build_pipeline(variant: str, model_path: Optional[str], device: str, n_estimators: int) -> list:
-    model_step = {"model": make_tabpfn(model_path, device, n_estimators),
-                  "name": f"TabPFN-{variant}"}
+def make_evaluator(task: str, X: np.ndarray, y: np.ndarray, device: str,
+                   model_path: Optional[str]):
+    """Return the CV evaluator used by the two-phase search."""
+
+    def evaluate(cfg: SearchConfig, folds: List[Tuple[np.ndarray, np.ndarray]]):
+        scores = []
+        for train_idx, valid_idx in folds:
+            pipe = Pipeline(cfg.steps() + [
+                ("model", make_model(task, N_ESTIMATORS_SEARCH, device, model_path))])
+            pipe.fit(X[train_idx], y[train_idx])
+            scores.append(score_of(task, y[valid_idx], pipe.predict(X[valid_idx])))
+        return float(np.mean(scores)), {"n_estimators": N_ESTIMATORS_SEARCH}
+
+    return evaluate
+
+
+def run_one(folder: Path, output_dir: Path, *, variant: str, task: str,
+            device: str, model_path: Optional[str], verbose: int) -> Dict[str, Any]:
+    X, y, X_test, y_test = load_dataset(folder)
+
+    encoder = None
+    if task == "classification":
+        encoder = LabelEncoder().fit(np.concatenate([y, y_test]) if y_test is not None else y)
+        y = encoder.transform(y)
+
     if variant == "raw":
-        # No preprocessing and no search: fit on calibration, predict on test.
-        return [model_step]
-    # variant == "opt": preprocessing search selected by SPXY-grouped CV.
-    return [*nonlinear_preprocessing_search(), cv_splitter(), model_step]
+        best_config, best_params, trace = SearchConfig(), {}, []
+    else:
+        best_config, best_params, trace = two_phase_search(
+            X, y, make_evaluator(task, X, y, device, model_path),
+            linear=False, verbose=verbose)
+
+    final = Pipeline(best_config.steps() + [
+        ("model", make_model(task, N_ESTIMATORS_FINAL, device, model_path))])
+    final.fit(X, y)
+    y_pred = final.predict(X_test)
+
+    y_true = y_test
+    if encoder is not None:
+        y_pred = encoder.inverse_transform(np.asarray(y_pred, dtype=int))
+
+    return write_outputs(output_dir, folder.name, best_config,
+                         {**best_params, "n_estimators_final": N_ESTIMATORS_FINAL},
+                         trace, y_pred, y_true, task)
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--variant", required=True, choices=["raw", "opt"])
+    p.add_argument("--variant", required=True, choices=["raw", "pp"])
+    p.add_argument("--task", default="regression", choices=["regression", "classification"])
     p.add_argument("--data-root", required=True)
     p.add_argument("--output-dir", default=None)
     p.add_argument("--datasets", nargs="*", default=None)
     p.add_argument("--limit", type=int, default=None)
-    p.add_argument("--model-path", default=None,
-                   help="Path to the TabPFN checkpoint (default: TabPFN's bundled model).")
     p.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
-    p.add_argument("--n-estimators", type=int, default=16)
+    p.add_argument("--model-path", default=None,
+                   help="Optional TabPFN checkpoint. The published runs used "
+                        "tabpfn-v2.5-regressor-v2.5_real.ckpt; without it the "
+                        "library default is used and numbers may differ slightly.")
     p.add_argument("--verbose", type=int, default=1)
     args = p.parse_args()
-    out = args.output_dir or f"./results_tabpfn_{args.variant}"
+
+    name = f"TabPFN-{'Raw' if args.variant == 'raw' else 'pp'}"
+    out = args.output_dir or f"./results_tabpfn_{args.variant}_{args.task}"
     run_over_datasets(
-        lambda: build_pipeline(args.variant, args.model_path, args.device, args.n_estimators),
-        f"TabPFN-{args.variant}", Path(args.data_root), Path(out),
+        lambda folder, outdir: run_one(folder, outdir, variant=args.variant,
+                                       task=args.task, device=args.device,
+                                       model_path=args.model_path, verbose=args.verbose),
+        name, Path(args.data_root), Path(out),
         datasets=args.datasets, limit=args.limit, verbose=args.verbose)
 
 
